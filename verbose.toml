@@ -1,0 +1,13 @@
+[package]
+name = "vpm"
+version = "0.1.0"
+description = "Serverless Cargo-style package manager for VerBose-Lang, written in VerBose-Lang"
+entry = "src/vpm.vb"
+license = "MIT"
+repository = "https://github.com/thetrung/verbose-pkg"
+
+[lib]
+include_dir = "src"
+entry = "manifest.vb"
+c_sources = []
+c_libs = []

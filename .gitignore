@@ -1,0 +1,7 @@
+vpm
+.vpkg/
+build/
+dist/
+*.ll
+*.o
+verbose.lock

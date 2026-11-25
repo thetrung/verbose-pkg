@@ -1,4 +1,8 @@
-' verbose-pkg (vpm) — Core String, File & Process Utilities (Pure VerBose-Lang)
+' verbose-pkg (vpm) — Core String, File, Process, CPU & Timing Utilities (100% Pure VerBose-Lang)
+
+Public Structure VpmTimespec
+  Dim tvSec, tvNsec As Long
+End Structure
 
 Declare Function fopen(path, mode As String) As Pointer
 Declare Function fclose(fp As Pointer) As Integer
@@ -6,13 +10,60 @@ Declare Function fseek(fp As Pointer, offset As Long, whence As Integer) As Inte
 Declare Function ftell(fp As Pointer) As Long
 Declare Function fread(buf As Pointer, sz, count As Long, fp As Pointer) As Long
 Declare Function fwrite(buf As Pointer, sz, count As Long, fp As Pointer) As Long
+Declare Function fgets(buf As Pointer, n As Integer, fp As Pointer) As Pointer
+Declare Function popen(cmd, mode As String) As Pointer
+Declare Function pclose(fp As Pointer) As Integer
+Declare Function opendir(path As String) As Pointer
+Declare Function closedir(dir As Pointer) As Integer
+Declare Function readlink(path As String, buf As Pointer, bufsiz As Long) As Long
+Declare Function sysconf(name As Integer) As Long
+Declare Function clock_gettime(clkId As Integer, ByRef ts As VpmTimespec) As Integer
 Declare Function system(cmd As String) As Integer
 Declare Function getenv(name As String) As Pointer
+Declare Function atoi(s As Pointer) As Integer
 Declare Function strlen(s As String) As Long
 Declare Function strcmp(a, b As String) As Integer
 Declare Function strncmp(a, b As String, n As Long) As Integer
 Declare Function memcpy(dst, src As Pointer, n As Long) As Pointer
 Declare Function memset(dst As Pointer, c As Integer, n As Long) As Pointer
+
+Public Function VpmTimeMs() As Double
+  Dim ts As VpmTimespec
+  clock_gettime(1, ByRef ts)
+  Return Double(ts.tvSec) * 1000.0 + Double(ts.tvNsec) * 0.000001
+End Function
+
+Public Function VpmCpuCount() As Integer
+  Dim envJobs As Pointer = getenv("VPM_JOBS")
+  If Not IsNull(envJobs) Then
+    Dim nEnv As Integer = atoi(envJobs)
+    If nEnv >= 1 Then
+      If nEnv > 32 Then
+        nEnv = 32
+      End If
+      Return nEnv
+    End If
+  End If
+  ' _SC_NPROCESSORS_ONLN = 84 on Linux
+  Dim n As Integer = Integer(sysconf(84))
+  If n < 1 Then
+    n = 4
+  End If
+  If n > 16 Then
+    n = 16
+  End If
+  Return n
+End Function
+
+Public Function VpmSelfExe(ByRef a As Arena, fallback As String) As String
+  Dim buf As Pointer = ArenaAllocBytes(ByRef a, 1024)
+  Dim n As Long = readlink("/proc/self/exe", buf, 1023)
+  If n > 0 Then
+    buf(Integer(n)) = Byte(0)
+    Return buf
+  End If
+  Return fallback
+End Function
 
 Public Function VpmStrLen(s As String) As Integer
   If IsNull(s) Then
@@ -117,6 +168,15 @@ Public Function VpmFileExists(path As String) As Boolean
   Return True
 End Function
 
+Public Function VpmDirExists(path As String) As Boolean
+  Dim d As Pointer = opendir(path)
+  If IsNull(d) Then
+    Return False
+  End If
+  closedir(d)
+  Return True
+End Function
+
 Public Function VpmReadFile(ByRef a As Arena, path As String) As String
   Dim fp As Pointer = fopen(path, "rb")
   If IsNull(fp) Then
@@ -125,7 +185,7 @@ Public Function VpmReadFile(ByRef a As Arena, path As String) As String
   fseek(fp, 0, 2)
   Dim sz As Long = ftell(fp)
   fseek(fp, 0, 0)
-  Dim n As Integer = sz
+  Dim n As Integer = Integer(sz)
   Dim buf As Pointer = ArenaAllocBytes(ByRef a, n + 1)
   If IsNull(buf) Then
     fclose(fp)
@@ -144,7 +204,7 @@ Public Function VpmWriteFile(path, content As String) As Boolean
   If IsNull(fp) Then
     Return False
   End If
-  Dim n As Long = VpmStrLen(content)
+  Dim n As Long = Long(VpmStrLen(content))
   If n > 0 Then
     fwrite(content, 1, n, fp)
   End If
@@ -157,7 +217,7 @@ Public Function VpmAppendFile(path, content As String) As Boolean
   If IsNull(fp) Then
     Return False
   End If
-  Dim n As Long = VpmStrLen(content)
+  Dim n As Long = Long(VpmStrLen(content))
   If n > 0 Then
     fwrite(content, 1, n, fp)
   End If
@@ -168,6 +228,37 @@ End Function
 Public Function VpmExec(cmd As String) As Integer
   Dim rc As Integer = system(cmd)
   Return rc
+End Function
+
+Public Sub VpmPrintFile(ByRef a As Arena, path As String)
+  Dim txt As String = VpmReadFile(ByRef a, path)
+  If Not IsNull(txt) Then
+    If VpmStrLen(txt) > 0 Then
+      Printf("%s", txt)
+    End If
+  End If
+End Sub
+
+Public Function VpmListTestFiles(ByRef a As Arena, dirPath As String, ByRef outFiles() As String, maxFiles As Integer) As Integer
+  If Not VpmDirExists(dirPath) Then
+    Return 0
+  End If
+  Dim cmd As String = $"find '{dirPath}' -maxdepth 1 -type f '(' -name 'test_*.vb' -o -name '*_test.vb' ')' 2>/dev/null | sort"
+  Dim fp As Pointer = popen(cmd, "r")
+  If IsNull(fp) Then
+    Return 0
+  End If
+  Dim line(512) As Byte
+  Dim count As Integer = 0
+  While (count < maxFiles) And (Not IsNull(fgets(line, 512, fp))) Do
+    Dim clean As String = VpmTrim(ByRef a, line)
+    If VpmStrLen(clean) > 0 Then
+      outFiles(count) = clean
+      count = count + 1
+    End If
+  End While
+  pclose(fp)
+  Return count
 End Function
 
 ' Extract quoted value from a TOML snippet starting at `pos` (pointing at or before `"`)
@@ -203,6 +294,7 @@ Public Function VpmIndexOf(haystack, needle As String) As Integer
     For j = 0 To nlen - 1 Do
       If haystack(i + j) <> needle(j) Then
         ok = False
+        Break
       End If
     End For
     If ok Then

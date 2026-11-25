@@ -70,3 +70,59 @@ Test "End-to-end: pack a C+VerBose library (--binary), install via archive into 
   VpmExec($"rm -rf '{root}'")
   ArenaDestroy(ByRef a)
 End Test
+
+Test "Parallel multithreaded workspace build & test across 3 libs + parallel install & --deps test"
+  Dim a As Arena = ArenaCreate(262144)
+  Dim root As String = "/tmp/vpm_parallel_test"
+  VpmExec($"rm -rf '{root}' && mkdir -p '{root}/lib-a/src' '{root}/lib-a/tests' '{root}/lib-b/src' '{root}/lib-b/tests' '{root}/lib-c/src' '{root}/lib-c/tests' '{root}/app/src' '{root}/app/tests'")
+
+  ' Workspace root verbose.toml
+  VpmWriteFile($"{root}/verbose.toml", "[package]\nname = \"multi-lib-ws\"\nversion = \"0.2.0\"\n\n[workspace]\nmembers = [\"lib-a\", \"lib-b\", \"lib-c\"]\n")
+
+  ' Verify manifest parser reads [workspace].members cleanly
+  Dim wm As Manifest
+  Assert ParseManifest(ByRef a, $"{root}/verbose.toml", ByRef wm), "Parse workspace manifest"
+  Assert wm.memberCount = 3, "Workspace has 3 members"
+  Assert VpmStrEq(wm.members(0), "lib-a") And VpmStrEq(wm.members(2), "lib-c"), "Workspace member names"
+
+  ' Create 3 independent pure-VerBose libraries with their own tests
+  VpmWriteFile($"{root}/lib-a/verbose.toml", "[package]\nname = \"lib-a\"\nversion = \"0.1.0\"\n\n[lib]\ninclude_dir = \"src\"\nentry = \"lib_a.vb\"\n")
+  VpmWriteFile($"{root}/lib-a/src/lib_a.vb", "Public Function LibAVal() As Integer\n  Return 10\nEnd Function\n")
+  VpmWriteFile($"{root}/lib-a/tests/test_a.vb", "Include \"lib_a.vb\"\nTest \"lib-a\"\n  Assert LibAVal() = 10\nEnd Test\n")
+
+  VpmWriteFile($"{root}/lib-b/verbose.toml", "[package]\nname = \"lib-b\"\nversion = \"0.1.0\"\n\n[lib]\ninclude_dir = \"src\"\nentry = \"lib_b.vb\"\n")
+  VpmWriteFile($"{root}/lib-b/src/lib_b.vb", "Public Function LibBVal() As Integer\n  Return 20\nEnd Function\n")
+  VpmWriteFile($"{root}/lib-b/tests/test_b.vb", "Include \"lib_b.vb\"\nTest \"lib-b\"\n  Assert LibBVal() = 20\nEnd Test\n")
+
+  VpmWriteFile($"{root}/lib-c/verbose.toml", "[package]\nname = \"lib-c\"\nversion = \"0.1.0\"\n\n[lib]\ninclude_dir = \"src\"\nentry = \"lib_c.vb\"\n")
+  VpmWriteFile($"{root}/lib-c/src/lib_c.vb", "Public Function LibCVal() As Integer\n  Return 12\nEnd Function\n")
+  VpmWriteFile($"{root}/lib-c/tests/test_c.vb", "Include \"lib_c.vb\"\nTest \"lib-c\"\n  Assert LibCVal() = 12\nEnd Test\n")
+
+  Dim vpmEnv As Pointer = getenv("VPM_BIN")
+  Dim vpmBin As String = "vpm"
+  If Not IsNull(vpmEnv) Then
+    vpmBin = vpmEnv
+  End If
+  Dim compEnv As Pointer = getenv("VERBOSE_BIN")
+  Dim compBin As String = "verbose"
+  If Not IsNull(compEnv) Then
+    compBin = compEnv
+  End If
+
+  ' 1. Parallel workspace build & test (-j 3)
+  Assert VpmExec($"cd '{root}' && VERBOSE_BIN='{compBin}' '{vpmBin}' build -j 3") = 0, "Workspace parallel build -j 3 failed"
+  Assert VpmExec($"cd '{root}' && VERBOSE_BIN='{compBin}' '{vpmBin}' test -j 3") = 0, "Workspace parallel test -j 3 failed"
+
+  ' 2. Consumer app depending on all 3 libs: parallel install + parallel multi-suite + --deps test
+  VpmWriteFile($"{root}/app/verbose.toml", "[package]\nname = \"multi-app\"\nversion = \"0.1.0\"\nentry = \"src/main.vb\"\n\n[dependencies]\nlib-a = { path = \"../lib-a\" }\nlib-b = { path = \"../lib-b\" }\nlib-c = { path = \"../lib-c\" }\n")
+  VpmWriteFile($"{root}/app/src/main.vb", "Include \"lib_a.vb\"\nInclude \"lib_b.vb\"\nInclude \"lib_c.vb\"\nPublic Function main() As Integer\n  If (LibAVal() + LibBVal() + LibCVal()) = 42 Then\n    Return 0\n  End If\n  Return 1\nEnd Function\n")
+  VpmWriteFile($"{root}/app/tests/test_sum.vb", "Include \"lib_a.vb\"\nInclude \"lib_b.vb\"\nTest \"a+b\"\n  Assert (LibAVal() + LibBVal()) = 30\nEnd Test\n")
+  VpmWriteFile($"{root}/app/tests/test_total.vb", "Include \"lib_a.vb\"\nInclude \"lib_b.vb\"\nInclude \"lib_c.vb\"\nTest \"a+b+c\"\n  Assert (LibAVal() + LibBVal() + LibCVal()) = 42\nEnd Test\n")
+
+  Assert VpmExec($"cd '{root}/app' && VERBOSE_BIN='{compBin}' '{vpmBin}' install -j 3") = 0, "Parallel install -j 3 failed"
+  Assert VpmExec($"cd '{root}/app' && VERBOSE_BIN='{compBin}' '{vpmBin}' run") = 0, "Consumer app run failed"
+  Assert VpmExec($"cd '{root}/app' && VERBOSE_BIN='{compBin}' '{vpmBin}' test -j 4 --deps") = 0, "Parallel test -j 4 --deps failed"
+
+  VpmExec($"rm -rf '{root}'")
+  ArenaDestroy(ByRef a)
+End Test
